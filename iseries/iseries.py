@@ -1,118 +1,184 @@
 import datetime
 import ftplib
+import logging
 import os
 import random
+from typing import Generator, List, Optional, Union, Any
 
 import pyodbc
 
 __author__ = 'Jean-Paul Miéville'
+__version__ = '1.2.0'
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 def rand_filename(length: int = 6) -> str:
     """
-
-    :param length:
-    :return:  Return a random filename with a length equal to the parameter length
+    Generate a random filename consisting of uppercase letters.
+    
+    Args:
+        length: The length of the filename (default: 6)
+        
+    Returns:
+        A random string of uppercase letters
+        
+    Raises:
+        ValueError: If length is less than 1
     """
+    if length < 1:
+        raise ValueError("Length must be at least 1")
     return "".join([chr(random.randint(65, 90)) for _ in range(length)])
 
 
 def today() -> int:
     """
-
-    :return: Return today date in the format of an integer YYYYMMDD
+    Get today's date as an integer in YYYYMMDD format.
+    
+    Returns:
+        Today's date as an integer (e.g., 20231215)
     """
     return int(datetime.datetime.now().strftime('%Y%m%d'))
 
 
 def now() -> int:
     """
-
-    :rtype: Return the current time with the format HHMMSS
+    Get the current time as an integer in HHMMSS format.
+    
+    Returns:
+        Current time as an integer (e.g., 143025 for 14:30:25)
     """
     return int(datetime.datetime.now().strftime('%H%M%S'))
 
 
-class Connect(object):
+class Connect:
     odbcString = "driver={iSeries Access ODBC Driver};SYSTEM=%s;" \
                  "UserID=%s;PWD=%s;AllowUnsupportedChar=1;DBQ=%s" \
                  ";XDYNAMIC=0;NAM=%i"
 
-    def __init__(self, host, user, pwd, lib, naming=1, autocommit=False):
+    def __init__(self, host: str, user: str, pwd: str, lib: str, 
+                 naming: int = 1, autocommit: bool = False) -> None:
         """
-        Initialize the connection with the as400
+        Initialize the connection to an iSeries/AS400 system.
 
-        naming = Specifies the naming convention used when referring to
-                 tables.
-                 0 = SQL naming (default)
-                 1 = DB2 Naming
-
-        Connection keyword in
-        http://publib.boulder.ibm.com/infocenter/iseries/v5r3/index.jsp?topic=/rzaik/connectkeywords.htm
-
-        :param host:
-        :param user:
-        :param pwd:
-        :param lib:
-        :param naming:
-        :param autocommit:
+        Args:
+            host: The hostname or IP address of the iSeries system
+            user: Username for authentication
+            pwd: Password for authentication
+            lib: Default library to use
+            naming: Naming convention (0=SQL naming, 1=DB2 naming)
+            autocommit: Whether to enable autocommit mode
+            
+        Raises:
+            pyodbc.Error: If connection fails
+            ValueError: If invalid parameters are provided
+            
+        Note:
+            Connection keywords documentation:
+            http://publib.boulder.ibm.com/infocenter/iseries/v5r3/index.jsp?topic=/rzaik/connectkeywords.htm
         """
+        if not all([host, user, pwd, lib]):
+            raise ValueError("All connection parameters (host, user, pwd, lib) are required")
+        
+        if naming not in (0, 1):
+            raise ValueError("Naming convention must be 0 (SQL) or 1 (DB2)")
+            
         self.autocommit = autocommit
         self.host = host
         self.user = user.upper()
         self.lib = lib
-        self.__password__ = pwd
         self.naming = naming
-        self.connect = pyodbc.connect(Connect.odbcString % (host,
-                                                            user,
-                                                            pwd,
-                                                            lib,
-                                                            naming),
-                                      autocommit=autocommit)
-        self.cursor = self.connect.cursor()
         self.closed = False
-        #
         self.outputLibrary = 'QTEMP'
-        #
-        self.query_header = None
+        self.query_header: Optional[List[str]] = None
+        
+        # Store password securely (consider using keyring or environment variables in production)
+        self._password = pwd
+        
+        try:
+            logger.info(f"Connecting to iSeries host: {host} as user: {user}")
+            self.connect = pyodbc.connect(
+                Connect.odbcString % (host, user, pwd, lib, naming),
+                autocommit=autocommit
+            )
+            self.cursor = self.connect.cursor()
+            logger.info("Successfully connected to iSeries")
+        except pyodbc.Error as e:
+            logger.error(f"Failed to connect to iSeries: {e}")
+            raise
 
-    def close(self):
+    def close(self) -> None:
         """
-        Close the connection
+        Close the database connection and cursor.
+        
+        This method is safe to call multiple times.
         """
         if not self.closed:
-            self.cursor.close()
-        self.connect.close()
-        self.closed = True
+            try:
+                if hasattr(self, 'cursor') and self.cursor:
+                    self.cursor.close()
+                if hasattr(self, 'connect') and self.connect:
+                    self.connect.close()
+                logger.info("Connection closed successfully")
+            except Exception as e:
+                logger.warning(f"Error while closing connection: {e}")
+            finally:
+                self.closed = True
 
-    def __enter__(self):
+    def __enter__(self) -> 'Connect':
         return self
 
-    def __exit__(self, error, msg, traceback):
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], 
+                 exc_tb: Optional[Any]) -> None:
         self.close()
 
-    def query(self, statement, *parameters):
+    def query(self, statement: str, *parameters: Any) -> Generator[Any, None, None]:
         """
-
-        :param statement:
-        :param parameters:
-        :return:
+        Execute a SQL query and return results as a generator.
+        
+        Args:
+            statement: SQL statement to execute
+            *parameters: Parameters for the SQL statement
+            
+        Returns:
+            Generator yielding database rows
+            
+        Raises:
+            pyodbc.Error: If query execution fails
         """
-        # the query method is using its own cursor to avoid collision if the user uses
+        if self.closed:
+            raise RuntimeError("Cannot execute query on closed connection")
+            
+        # Use a separate cursor to avoid collision with other operations
         cursor = self.connect.cursor()
-        if parameters:
-            cursor.execute(statement, parameters)
-        else:
-            cursor.execute(statement)
+        
         try:
-            # select statement
-            self.query_header = [d[0] for d in cursor.description]
-        except TypeError:
-            # other statement like update, insert
-            self.query_header = None
-        return (row for row in cursor)
+            logger.debug(f"Executing query: {statement[:100]}...")
+            if parameters:
+                cursor.execute(statement, parameters)
+            else:
+                cursor.execute(statement)
+            
+            try:
+                # SELECT statement - has description
+                self.query_header = [d[0] for d in cursor.description]
+                logger.debug(f"Query returned {len(self.query_header)} columns")
+            except TypeError:
+                # Non-SELECT statement (UPDATE, INSERT, etc.)
+                self.query_header = None
+                logger.debug("Query executed successfully (non-SELECT)")
+            
+            return (row for row in cursor)
+            
+        except pyodbc.Error as e:
+            logger.error(f"Query execution failed: {e}")
+            raise
+        finally:
+            cursor.close()
 
-    def dspfd(self, library, output, file_name='*ALL', file_type='*MBR', file_attribute='*ALL'):
+    def dspfd(self, library: str, output: str, file_name: str = '*ALL', 
+              file_type: str = '*MBR', file_attribute: str = '*ALL') -> Optional[Generator[Any, None, None]]:
         """
         'QSYS/DSPFD FILE(MVXBDTA010/*ALL) TYPE(*MBR) OUTPUT(*OUTFILE) OUTFILE(QTEMP/JP12345)'
 
@@ -126,7 +192,8 @@ class Connect(object):
         #
         return self.executeCLCmd(cmd, output)
 
-    def dspobjd(self, library, object, object_type, output, output_menber="*REPLACE"):
+    def dspobjd(self, library: str, object: str, object_type: str, output: str, 
+                output_member: str = "*REPLACE") -> Optional[Generator[Any, None, None]]:
         """
         DSPOBJD = Display Object Description
 
@@ -139,12 +206,12 @@ class Connect(object):
         """
 
         cmd_string = "DSPOBJD OBJ({library}/{object}) OBJTYPE({object_type}) DETAIL(*FULL) OUTPUT(*OUTFILE) " \
-                     "OUTFILE({output_lib}/{output}) OUTMBR(*FIRST {output_menber})"
+                     "OUTFILE({output_lib}/{output}) OUTMBR(*FIRST {output_member})"
         cmd = cmd_string.format(library=library, object=object, object_type=object_type, output_lib=self.outputLibrary,
-                                output=output, output_menber=output_menber)
+                                output=output, output_member=output_member)
         return self.executeCLCmd(cmd, output)
 
-    def dspffd(self, library, output, file_name='*ALL'):
+    def dspffd(self, library: str, output: str, file_name: str = '*ALL') -> Optional[Generator[Any, None, None]]:
         """
         Execute the CL command DSPFFD - Display File Field Description
 
@@ -163,7 +230,8 @@ class Connect(object):
         cmd = dspffd % (library, file_name, self.outputLibrary, output)
         return self.executeCLCmd(cmd, output)
 
-    def cpyf(self, from_table, from_lib, to_table, to_lib, mbropt, crtfile):
+    def cpyf(self, from_table: str, from_lib: str, to_table: str, to_lib: str, 
+             mbropt: str, crtfile: str) -> None:
         """
 
         :param from_table:
@@ -195,7 +263,7 @@ class Connect(object):
         #
         self.executeCLCmd(cmd, output=None)
 
-    def chgdtaara(self, data_area, library, value):
+    def chgdtaara(self, data_area: str, library: str, value: str) -> None:
         """
 
         :param data_area:
@@ -207,30 +275,75 @@ class Connect(object):
                                                                                 value=value)
         self.executeCLCmd(cmd, output=None)
 
-    def executeCLCmd(self, cmd, output=None):
+    def executeCLCmd(self, cmd: str, output: Optional[str] = None) -> Optional[Generator[Any, None, None]]:
         """
-        Execute a CL command
+        Execute a CL (Control Language) command on the iSeries.
+        
+        Args:
+            cmd: CL command to execute
+            output: Optional output file name to create in QTEMP
+            
+        Returns:
+            Generator of result rows if output is specified, None otherwise
+            
+        Raises:
+            ValueError: If using DB2 naming convention (not supported)
+            pyodbc.Error: If command execution fails
         """
+        if self.closed:
+            raise RuntimeError("Cannot execute CL command on closed connection")
+            
+        if self.naming == 1:
+            raise ValueError("CL command execution is not supported with DB2 naming convention (naming=1)")
+        
+        # Escape single quotes in the command
         cmd_escape = cmd.replace("'", "''")
-        if self.naming:
-            raise ValueError("The execution of CL command is not supported with the naming convention 1")
         cl_command = "CALL QSYS.QCMDEXC('%s',%010i.00000)"
-        self.cursor.execute(cl_command % (cmd_escape, len(cmd)))
-        #
-        if output:
-            self.cursor.execute('select * from %s.%s' % (self.outputLibrary,
-                                                         output))
-            return (row for row in self.cursor)
+        
+        try:
+            logger.info(f"Executing CL command: {cmd}")
+            self.cursor.execute(cl_command % (cmd_escape, len(cmd)))
+            
+            if output:
+                logger.debug(f"Retrieving output from {self.outputLibrary}.{output}")
+                self.cursor.execute(f'SELECT * FROM {self.outputLibrary}.{output}')
+                return (row for row in self.cursor)
+            
+            logger.info("CL command executed successfully")
+            return None
+            
+        except pyodbc.Error as e:
+            logger.error(f"CL command execution failed: {e}")
+            raise
 
-    def ftpSend(self, file_path, library):
+    def ftpSend(self, file_path: str, library: str) -> None:
         """
-        Put a file by FTP on the i5 on the specified library using
-        the user and password defined when an instance of the class is created.
-        This not the safest way, but the most convenient.
-
+        Upload a file to the iSeries via FTP.
+        
+        Args:
+            file_path: Local path to the file to upload
+            library: Target library on the iSeries
+            
+        Raises:
+            FileNotFoundError: If the local file doesn't exist
+            ftplib.all_errors: If FTP operation fails
+            
+        Warning:
+            This method uses FTP credentials from the connection.
+            Consider using more secure file transfer methods in production.
         """
-        ftp = ftplib.FTP(self.host, self.user, self.__password__)
-        ftp.cwd(library)
-        file_name = os.path.split(file_path)[1]
-        with open(file_path, 'r') as file_handle:
-            ftp.storlines('STOR %s' % file_name, file_handle)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+            
+        file_name = os.path.basename(file_path)
+        
+        try:
+            logger.info(f"Starting FTP upload of {file_name} to library {library}")
+            with ftplib.FTP(self.host, self.user, self._password) as ftp:
+                ftp.cwd(library)
+                with open(file_path, 'r', encoding='utf-8') as file_handle:
+                    ftp.storlines(f'STOR {file_name}', file_handle)
+            logger.info(f"Successfully uploaded {file_name}")
+        except ftplib.all_errors as e:
+            logger.error(f"FTP upload failed: {e}")
+            raise
