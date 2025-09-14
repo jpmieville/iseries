@@ -3,7 +3,9 @@
 [![Python Version](https://img.shields.io/badge/python-3.7%2B-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A modern, type-annotated Python library that simplifies ODBC connections to iSeries (AS/400) IBM servers. Built on top of pyODBC, this library provides a clean, Pythonic interface for interacting with iSeries systems.
+This modern, type-annotated Python library streamlines ODBC connectivity to IBM iSeries (AS/400) servers. Built on top of pyODBC, it offers a clean, Pythonic interface for seamless interaction with iSeries systems.
+
+On Windows, this library eliminates the need to manually configure user or system DSNs in the ODBC Administrator, allowing direct connections with simple Python code.
 
 ## Features
 
@@ -139,11 +141,13 @@ except FileNotFoundError as e:
 ### Connect Class
 
 #### Constructor
+
 ```python
 Connect(host, user, pwd, lib, naming=1, autocommit=False)
 ```
 
 **Parameters:**
+
 - `host` (str): iSeries hostname or IP address
 - `user` (str): Username for authentication
 - `pwd` (str): Password for authentication  
@@ -183,6 +187,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Changelog
 
 ### Version 1.2.0
+
 - Added comprehensive type hints
 - Improved error handling and logging
 - Enhanced documentation
@@ -190,4 +195,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Updated package metadata
 
 ### Version 1.1
+
 - Initial release
